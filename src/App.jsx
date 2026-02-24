@@ -1,4 +1,4 @@
-import { useState, Fragment } from "react";
+import React, { useState, useRef, Fragment } from "react";
 
 const C={bg:"#F6F4F1",card:"#FFF",border:"#E8E4DE",t1:"#1A1816",t2:"#5A564F",t3:"#8A8680",accent:"#6B5B3E",aL:"#8B7355",green:"#2E7D52",gBg:"#EAF4EE",red:"#C0392B",rBg:"#FDEDEC",amber:"#B8860B",aBg:"#FDF6E3",esc:"#6B4C8A",eBg:"#F3EEF8"};
 const dc=d=>d==="fight"?C.red:d==="accept"?C.green:C.esc;
