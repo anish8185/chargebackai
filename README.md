@@ -1,6 +1,6 @@
 # ChargebackAI
 
-An AI-powered dispute investigation system for card-issuing banks. Built as a take-home submission for an AI PM Lead role.
+An AI-powered dispute investigation system for card-issuing banks.
 
 ## What it does
 
