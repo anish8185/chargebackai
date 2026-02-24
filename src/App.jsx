@@ -205,7 +205,7 @@ const CASES=[
 async function callLLM(systemPrompt, userPrompt){
   const r=await fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",headers:{"Content-Type":"application/json","x-api-key":import.meta.env.VITE_ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:600,temperature:0,system:systemPrompt,
+    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1200,temperature:0,system:systemPrompt,
       messages:[{role:"user",content:userPrompt}]})});
   if(!r.ok)throw new Error(`API ${r.status}: ${await r.text()}`);
   const d=await r.json();
