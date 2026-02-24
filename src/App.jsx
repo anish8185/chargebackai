@@ -204,8 +204,8 @@ const CASES=[
 // Evidence/risk: only system + matched factors. No config or case context needed.
 async function callLLM(systemPrompt, userPrompt){
   const r=await fetch("https://api.anthropic.com/v1/messages",{
-    method:"POST",headers:{"Content-Type":"application/json","x-api-key":import.meta.env.VITE_ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1200,temperature:0,system:systemPrompt,
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,temperature:0,system:systemPrompt,
       messages:[{role:"user",content:userPrompt}]})});
   if(!r.ok)throw new Error(`API ${r.status}: ${await r.text()}`);
   const d=await r.json();
@@ -220,8 +220,8 @@ async function callLLMFull(systemPrompt, configPrompt, casePrompt, userPrompt){
     {role:"assistant",content:"Case data received and understood."},
     {role:"user",content:userPrompt},];
   const r=await fetch("https://api.anthropic.com/v1/messages",{
-    method:"POST",headers:{"Content-Type":"application/json","x-api-key":import.meta.env.VITE_ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:800,system:systemPrompt,messages})});
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,system:systemPrompt,messages})});
   if(!r.ok)throw new Error(`API ${r.status}: ${await r.text()}`);
   const d=await r.json();
   return d.content.map(b=>b.text||"").join("").trim();}
@@ -253,9 +253,16 @@ Structure:
 Keep the letter under 200 words. Respond with plain text only. No markdown, no JSON.`;
 
 const SYSTEM_ESCALATION=`You are a senior dispute analyst at a card-issuing bank reviewing an ambiguous cardholder dispute.
-Based on the case data and matched risk factors, recommend 3-4 specific investigative actions the issuer should take to resolve ambiguity before making a final accept or fight decision.
-Each recommendation should name a specific internal system, data source, or action available to the issuer — not generic advice.
-Respond with valid JSON only. Schema: {"recommendations":[{"title":<string>,"action":<string>,"rationale":<string>}]}`;
+Based on the case data and matched risk factors, recommend 3-4 specific investigative actions to resolve ambiguity before making a final accept or fight decision.
+
+CRITICAL CONSTRAINTS — you must follow these strictly:
+1. Only recommend actions the ISSUING BANK can take using data it already has or can access directly. This includes: internal transaction history, authorization logs, account activity, cardholder communication records, internal fraud databases, device/IP logs, and prior dispute history.
+2. Do NOT recommend contacting the merchant, requesting documents from the merchant, or asking the merchant's bank for anything. The issuer cannot compel the merchant to respond at this stage.
+3. Do NOT recommend generic actions like "contact the cardholder" unless there is a specific data point to verify with them.
+4. You MAY recommend checking publicly available information (e.g. merchant reputation, business status, known fraud patterns for this merchant) only if it is directly relevant to resolving the ambiguity in this specific case.
+5. Each action must name a specific internal system, data source, or lookup — not vague advice.
+
+Respond with valid JSON only. No markdown. Schema: {"recommendations":[{"title":<string>,"action":<string>,"rationale":<string>}]}`;
 
 function buildConfigPrompt(code, cfg){
   const wf=cfg.codes[code];
@@ -618,6 +625,7 @@ function InvestigationTab({cfg, cfgV}){
   const [err, setErr]=useState(null);
   const [evR, setEvR]=useState(null);
   const [rkR, setRkR]=useState(null);
+  const [enrichedKase, setEnrichedKase]=useState(null);
   const [exp, setExp]=useState({});
   const [dec, setDec]=useState(null);
   const [sel, setSel]=useState({});
@@ -630,7 +638,7 @@ function InvestigationTab({cfg, cfgV}){
   const [seenV, setSeenV]=useState(cfgV);
   const [trace, setTrace]=useState([]);
   const [traceOpen, setTraceOpen]=useState(false);
-  const traceRef=React.useRef([]);
+  const traceRef=useRef([]);
   function addTrace(type, msg, meta={}){
     const e={id:Date.now()+Math.random(),time:new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}),type,msg,...meta};
     traceRef.current=[...traceRef.current,e];
@@ -644,7 +652,7 @@ function InvestigationTab({cfg, cfgV}){
   const cfgStale=cfgV!==seenV&&pDone;
 
   function reset(){
-    setPipe("idle");setCurAg(null);setDoneA([]);setErr(null);setEvR(null);setRkR(null);
+    setPipe("idle");setCurAg(null);setDoneA([]);setErr(null);setEvR(null);setRkR(null);setEnrichedKase(null);
     setExp({});setDec(null);setSel({});setLDec(null);setLTxt("");setLDirty(false);
     setShowP({});setShowRaw(false);setItab("Overview");setSeenV(cfgV);
     setTrace([]);traceRef.current=[];}
@@ -655,6 +663,58 @@ function InvestigationTab({cfg, cfgV}){
     return t==="Overview"||(t==="Analysis"&&pipe!=="idle")||(t==="Recommendation"&&doneA.includes("recommendation"))||(t==="Decision"&&pDone);
   }
 
+
+  // ── Visa Network Rules ───────────────────────────────────────────────────
+  const VISA_RULES={
+    "13.1":{
+      title:"Merchandise / Services Not Received",
+      fieldTags:{
+        "evidence_available.delivery_confirmation.exists":"req",
+        "evidence_available.delivery_confirmation.tracking_number":"req",
+        "evidence_available.delivery_confirmation.signature_on_file":"req",
+        "evidence_available.delivery_confirmation.delivery_address_match":"ce",
+        "evidence_available.customer_communication.exists":"ce",
+        "evidence_available.order_confirmation.exists":"ce",
+      },
+      filingWindow:"120 days from expected delivery date",
+      responseWindow:"30 days from dispute date",
+      requiredEvidence:["Proof of delivery to billing/shipping address","Carrier tracking confirmation","Signature confirmation (transactions >$25)"],
+      compellingEvidence:["Delivery to cardholder-specified address","Signed proof of delivery","IP/device match to prior orders","Prior dispute history with same merchant"],
+      invalidConditions:["Cardholder signed for delivery","Digital goods with confirmed IP match and usage logs","Cardholder collected item in-store with ID"],
+      guidance:"Visa requires documented proof of delivery to the address provided at checkout. Signature confirmation is mandatory for transactions over $25. Without carrier confirmation, the issuer cannot successfully represent this dispute."
+    },
+    "13.2":{
+      title:"Cancelled Recurring Transaction",
+      fieldTags:{
+        "evidence_available.order_confirmation.exists":"req",
+        "evidence_available.refund_policy_acceptance.exists":"req",
+        "evidence_available.customer_communication.exists":"req",
+        "evidence_available.order_confirmation.opened":"ce",
+      },
+      filingWindow:"120 days from transaction date",
+      responseWindow:"30 days from dispute date",
+      requiredEvidence:["Proof cardholder did not cancel","Cancellation policy accepted at enrollment","Evidence of continued service use after alleged cancellation"],
+      compellingEvidence:["Signed terms with clear recurring billing disclosure","Usage logs post-cancellation date","Prior successful charges not disputed","Email confirmation of cancellation denial"],
+      invalidConditions:["Merchant can prove cancellation was not requested","Cardholder continued using service after claimed cancellation date","Terms clearly disclosed recurring nature at checkout"],
+      guidance:"Visa mandates that merchants disclose recurring billing terms clearly at enrollment. If the cardholder can demonstrate a valid cancellation request was ignored, the dispute is typically valid. Continued usage after the cancellation date is strong counter-evidence."
+    },
+    "13.3":{
+      title:"Not as Described or Defective Merchandise",
+      fieldTags:{
+        "evidence_available.order_confirmation.exists":"req",
+        "evidence_available.refund_policy_acceptance.exists":"req",
+        "evidence_available.delivery_confirmation.exists":"ce",
+        "evidence_available.customer_communication.exists":"ce",
+        "evidence_available.order_confirmation.opened":"ce",
+      },
+      filingWindow:"120 days from date cardholder received merchandise",
+      responseWindow:"30 days from dispute date",
+      requiredEvidence:["Proof item matched description at time of sale","Evidence cardholder received item as described","Return/refund policy disclosed at checkout"],
+      compellingEvidence:["Product listing matching dispute timeframe","Evidence cardholder used or consumed item","Photos or inspection report contradicting claim","Prior accepted return policy"],
+      invalidConditions:["Item was returned and credit already issued","Cardholder did not attempt to return item per policy","Dispute filed after return window expired"],
+      guidance:"Visa requires the cardholder to attempt resolution with the merchant before filing. The issuer must verify that the item materially differed from its description. Merchants should provide product documentation and return correspondence."
+    },
+  };
 
   // ── Evidence Retrieval Agent ─────────────────────────────────────────────
   // Mock tool registry: simulates async API calls with realistic delays.
@@ -722,6 +782,7 @@ function InvestigationTab({cfg, cfgV}){
       // ── Step 0: Evidence Retrieval Agent ──
       setCurAg("retrieval");
       const enrichedKase=await runEvidenceRetrieval(kase,addTrace);
+      setEnrichedKase(enrichedKase);
       setDoneA(["retrieval"]);
 
       // ── Step 1: JS rubric evaluation — deterministic, no LLM ──
@@ -833,14 +894,18 @@ function InvestigationTab({cfg, cfgV}){
   // Human-in-loop check
   const hlTriggered=(cfg.humanLoop.rules||[]).some(r=>evalOp(getVal(kase,r.field),r.op,r.thresh));
 
-  const keyEvidence=[
-    ["Delivery Confirmation",kase.evidence_available?.delivery_confirmation?.exists?"Yes — "+kase.evidence_available.delivery_confirmation.carrier:"No"],
-    ["Signature On File",kase.evidence_available?.delivery_confirmation?.signature_on_file?"Yes":"No"],
-    ["Address Match",kase.evidence_available?.delivery_confirmation?.delivery_address_match?"Yes":"No"],
-    ["Order Confirmation",kase.evidence_available?.order_confirmation?.exists?"Sent"+(kase.evidence_available.order_confirmation.opened?" (opened)":""):"No"],
-    ["Refund Policy Accepted",kase.evidence_available?.refund_policy_acceptance?.exists?"Yes":"No"],
-    ["Customer Communication",kase.evidence_available?.customer_communication?.exists?kase.evidence_available.customer_communication.summary:"None"],
-  ];
+  const ea0=kase.evidence_available;
+  const ea1=enrichedKase?.evidence_available;
+  function evVal(ea){return [
+    ["Delivery Confirmation",ea?.delivery_confirmation?.exists?"Yes — "+(ea.delivery_confirmation.carrier||""):"No"],
+    ["Signature On File",ea?.delivery_confirmation?.signature_on_file?"Yes":"No"],
+    ["Address Match",ea?.delivery_confirmation?.delivery_address_match?"Yes":"No"],
+    ["Order Confirmation",ea?.order_confirmation?.exists?"Sent"+(ea.order_confirmation.opened?" (opened)":""):"No"],
+    ["Refund Policy Accepted",ea?.refund_policy_acceptance?.exists?"Yes":"No"],
+    ["Customer Communication",ea?.customer_communication?.exists?ea.customer_communication.summary:"None"],
+  ];}
+  const keyEvidence=evVal(ea1||ea0);
+  const keyEvidenceOrig=ea1?evVal(ea0):null;
 
   function flattenObj(obj,prefix=""){
     return Object.entries(obj||{}).flatMap(([k,v])=>{
@@ -848,7 +913,11 @@ function InvestigationTab({cfg, cfgV}){
       if(v!==null&&typeof v==="object"&&!Array.isArray(v))return flattenObj(v,key);
       return [[key,String(v)]];});}
   const {_meta,...caseDataForRaw}=kase;
-  const rawRows=flattenObj(caseDataForRaw);
+  const rawRowsOrig=flattenObj(caseDataForRaw);
+  const enrichedForRaw=enrichedKase?{...enrichedKase,_meta:undefined}:null;
+  const {_meta:_m2,...enrichedDataForRaw}=enrichedKase||{_meta:null};
+  const rawRows=enrichedKase?flattenObj(enrichedDataForRaw):rawRowsOrig;
+  const rawOrigMap=new Map(rawRowsOrig);
 
   const AGENTS=[
     {key:"retrieval",label:"Evidence Retrieval",icon:"🌐",score:()=>null},
@@ -873,8 +942,7 @@ function InvestigationTab({cfg, cfgV}){
       {CASES.map((c,i)=>{
         const icon=c._meta.outcome==="fight"?"⚔️":c._meta.outcome==="accept"?"✓":"↑";
         return <button key={i} className={`cb${ci===i?" on":""}`} onClick={()=>setCi(i)}>
-          {c.dispute.dispute_id} · {c._meta.code}
-          <span style={{fontSize:10,display:"block",opacity:.8,marginTop:1}}>{icon} {c._meta.outcome.charAt(0).toUpperCase()+c._meta.outcome.slice(1)} · {c._meta.label}</span>
+          {c._meta.code} · {icon} {c._meta.outcome.charAt(0).toUpperCase()+c._meta.outcome.slice(1)}
         </button>;
       })}</div>
 
@@ -925,17 +993,31 @@ function InvestigationTab({cfg, cfgV}){
             <div style={{fontSize:12,fontWeight:600,color:C.t2}}>Available Key Evidence</div>
             <button className="btn sm" onClick={()=>setShowRaw(r=>!r)}>{showRaw?"Hide Raw Data":"Show All Raw Data"}</button>
           </div>
-          {keyEvidence.map(([k,v])=>(
-            <div key={k} style={{display:"flex",gap:8,padding:"5px 0",borderBottom:"1px solid #F2EFE9",fontSize:12}}>
+          {keyEvidence.map(([k,v],i)=>{
+            const orig=keyEvidenceOrig?.[i]?.[1];
+            const changed=orig!==undefined&&orig!==v;
+            return <div key={k} style={{display:"flex",gap:8,padding:"5px 0",borderBottom:"1px solid #F2EFE9",fontSize:12,background:changed?"#FFFBF0":undefined}}>
               <span style={{fontFamily:"Space Mono,monospace",fontSize:10,color:C.t3,minWidth:180,paddingTop:1}}>{k}</span>
-              <span style={{color:C.t2}}>{String(v)}</span></div>))}
+              <span style={{color:C.t2,flex:1}}>{String(v)}
+                {changed&&<span style={{fontSize:10,fontWeight:600,color:C.amber,background:"#FFF3CD",border:"1px solid #FFEAA7",borderRadius:3,padding:"1px 5px",marginLeft:6}}>updated</span>}
+              </span>
+              {changed&&<span style={{fontFamily:"Space Mono,monospace",fontSize:10,color:C.t3,textDecoration:"line-through",opacity:.6}}>{String(orig)}</span>}
+            </div>;})}
           {showRaw&&<div style={{marginTop:12}}>
-            <div style={{fontSize:11,fontWeight:600,color:C.t3,textTransform:"uppercase",letterSpacing:".6px",marginBottom:8}}>All Raw Case Data</div>
+            <div style={{fontSize:11,fontWeight:600,color:C.t3,textTransform:"uppercase",letterSpacing:".6px",marginBottom:8}}>All Raw Case Data{enrichedKase&&<span style={{fontWeight:400,marginLeft:6,color:C.amber}}>— showing retrieval agent updates</span>}</div>
             <table className="ft" style={{fontSize:11}}>
-              <thead><tr><th>Field Path</th><th>Value</th></tr></thead>
-              <tbody>{rawRows.map(([k,v])=>(
-                <tr key={k}><td style={{fontFamily:"Space Mono,monospace",color:C.t3,fontSize:10}}>{k}</td><td style={{color:C.t2}}>{v}</td></tr>
-              ))}</tbody></table>
+              <thead><tr><th>Field Path</th><th>Value</th>{enrichedKase&&<th style={{color:C.t3}}>Original</th>}</tr></thead>
+              <tbody>{rawRows.map(([k,v])=>{
+                const origV=rawOrigMap.get(k);
+                const changed=enrichedKase&&origV!==undefined&&origV!==v;
+                return <tr key={k} style={{background:changed?"#FFFBF0":undefined}}>
+                  <td style={{fontFamily:"Space Mono,monospace",color:C.t3,fontSize:10}}>{k}</td>
+                  <td style={{color:changed?C.amber:C.t2,fontWeight:changed?600:400}}>
+                    {v}{changed&&<span style={{fontSize:9,fontWeight:700,background:"#FFF3CD",border:"1px solid #FFEAA7",borderRadius:2,padding:"1px 4px",marginLeft:5}}>updated</span>}
+                  </td>
+                  {enrichedKase&&<td style={{color:C.t3,fontSize:10,textDecoration:changed?"line-through":"none",opacity:changed?0.5:0}}>{changed?origV:""}</td>}
+                </tr>;})}
+              </tbody></table>
           </div>}</div>
         {pipe==="idle"&&<div style={{background:"#F5EFE6",border:"1px solid #DDD0BC",borderRadius:10,padding:"11px 16px",fontSize:13,color:C.aL,display:"flex",alignItems:"center",gap:10}}>
           ▶ Click <strong>Run Pipeline</strong> — config prompts are built from current Config thresholds and rubric for code {code}.
@@ -943,6 +1025,46 @@ function InvestigationTab({cfg, cfgV}){
         {cfgStale&&<div style={{background:"#FFF3CD",border:"1px solid #FFEAA7",borderRadius:10,padding:"11px 16px",fontSize:13,color:"#856404",display:"flex",alignItems:"center",gap:10,marginTop:10}}>
           ⚠ Config updated after this run. <button className="btn sm" style={{marginLeft:8}} onClick={reset}>Re-run with new config</button>
         </div>}
+        {(()=>{const vr=VISA_RULES[code];if(!vr)return null;
+          const dl=kase.dispute.response_deadline;
+          const daysLeft=Math.ceil((new Date(dl)-new Date())/(1000*60*60*24));
+          const dlColor=daysLeft<=7?C.red:daysLeft<=14?C.amber:C.green;
+          return <div className="ipnl" style={{marginTop:10,borderLeft:"3px solid #1A56A0"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+              <span style={{fontSize:10,fontWeight:700,background:"#1A56A0",color:"#fff",padding:"2px 7px",borderRadius:3,letterSpacing:".5px"}}>VISA</span>
+              <div className="pt" style={{marginBottom:0}}>Network Rules — {code}: {vr.title}</div>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+              <div style={{background:C.bg,borderRadius:6,padding:"8px 10px"}}>
+                <div style={{fontSize:10,color:C.t3,textTransform:"uppercase",letterSpacing:".6px",marginBottom:3}}>Filing Window</div>
+                <div style={{fontSize:12,color:C.t2,fontWeight:500}}>{vr.filingWindow}</div>
+              </div>
+              <div style={{background:C.bg,borderRadius:6,padding:"8px 10px"}}>
+                <div style={{fontSize:10,color:C.t3,textTransform:"uppercase",letterSpacing:".6px",marginBottom:3}}>Response Deadline</div>
+                <div style={{fontSize:12,fontWeight:700,color:dlColor}}>{daysLeft>0?`${daysLeft} days remaining`:"EXPIRED"} — {new Date(dl).toLocaleDateString()}</div>
+              </div>
+            </div>
+            <div style={{marginBottom:10}}>
+              <div style={{fontSize:10,fontWeight:700,color:"#1A56A0",textTransform:"uppercase",letterSpacing:".6px",marginBottom:5}}>Visa-Required Evidence</div>
+              {vr.requiredEvidence.map((e,i)=><div key={i} style={{fontSize:12,color:C.t2,padding:"3px 0",display:"flex",gap:6}}>
+                <span style={{color:"#1A56A0",fontWeight:700,flexShrink:0}}>▸</span>{e}
+              </div>)}
+            </div>
+            <div style={{marginBottom:10}}>
+              <div style={{fontSize:10,fontWeight:700,color:C.green,textTransform:"uppercase",letterSpacing:".6px",marginBottom:5}}>Compelling Evidence</div>
+              {vr.compellingEvidence.map((e,i)=><div key={i} style={{fontSize:12,color:C.t2,padding:"3px 0",display:"flex",gap:6}}>
+                <span style={{color:C.green,fontWeight:700,flexShrink:0}}>✓</span>{e}
+              </div>)}
+            </div>
+            <div style={{marginBottom:10}}>
+              <div style={{fontSize:10,fontWeight:700,color:C.red,textTransform:"uppercase",letterSpacing:".6px",marginBottom:5}}>Invalid Dispute Conditions</div>
+              {vr.invalidConditions.map((e,i)=><div key={i} style={{fontSize:12,color:C.t2,padding:"3px 0",display:"flex",gap:6}}>
+                <span style={{color:C.red,fontWeight:700,flexShrink:0}}>✗</span>{e}
+              </div>)}
+            </div>
+            <div style={{fontSize:12,color:C.t3,fontStyle:"italic",borderTop:`1px solid ${C.border}`,paddingTop:8,lineHeight:1.6}}>{vr.guidance}</div>
+          </div>;
+        })()}
       </Fragment>}
 
       {/* ── Agent Trace Panel (Analysis tab) ── */}
@@ -1023,17 +1145,24 @@ function InvestigationTab({cfg, cfgV}){
                   {showP[key]?"Hide Prompts":"Show Prompts"}
                 </button></div>
               {showP[key]&&<div className="pbox">{promptDisplay}</div>}
-              <table className="ft" style={{marginTop:8}}>
+              {(()=>{const vr=VISA_RULES[code];
+                const fieldTags=vr?.fieldTags||{};
+                function visaBadge(field){
+                  const tag=fieldTags[field];
+                  if(tag==="req")return <span style={{fontSize:8,fontWeight:700,background:"#1A56A0",color:"#fff",padding:"1px 5px",borderRadius:2,marginLeft:5,verticalAlign:"middle",letterSpacing:".3px"}}>VISA REQ</span>;
+                  if(tag==="ce")return <span style={{fontSize:8,fontWeight:700,background:"#E8F0FB",color:"#1A56A0",border:"1px solid #BDD0F0",padding:"1px 5px",borderRadius:2,marginLeft:5,verticalAlign:"middle",letterSpacing:".3px"}}>COMPELLING</span>;
+                  return null;}
+                return <table className="ft" style={{marginTop:8}}>
                 <thead><tr><th>Factor</th><th>Field</th><th>Observed</th><th>Impact</th><th style={{width:18}}></th></tr></thead>
                 <tbody>{(data||[]).map((f,i)=><Fragment key={i}>
                   <tr className="fr" onClick={()=>setExp(p=>({...p,[`${prefix}${i}`]:!p[`${prefix}${i}`]}))}>
-                    <td style={{fontWeight:500}}>{f.name}</td>
+                    <td style={{fontWeight:500}}>{f.name}{visaBadge(f.field)}</td>
                     <td style={{fontFamily:"Space Mono,monospace",fontSize:10,color:C.t3}}>{f.field}</td>
                     <td style={{fontFamily:"Space Mono,monospace",fontSize:11,color:C.t2}}>{String(f.observed)}</td>
                     <td><span style={{fontSize:12,fontWeight:700,color:fc(f.impact)}}>{f.pts>0?"+":""}{f.pts}</span></td>
                     <td style={{fontSize:10,color:C.t3}}>{exp[`${prefix}${i}`]?"▲":"▼"}</td></tr>
                   {exp[`${prefix}${i}`]&&<tr><td colSpan={5} className="fex">{f.detail}</td></tr>}
-                </Fragment>)}</tbody></table></div>));
+                </Fragment>)}</tbody></table>;})()}</div>));
         })()}
       </Fragment>}
 
@@ -1055,9 +1184,65 @@ function InvestigationTab({cfg, cfgV}){
             {recVal==="fight"?"⚔️ Recommend: Fight (deny dispute)":recVal==="accept"?"✓ Recommend: Accept (uphold dispute)":"↑ Recommend: Escalate"}
           </div>
           <p style={{fontSize:14,color:C.t2,lineHeight:1.7,marginBottom:8}}>{rkR.reasoning}</p>
-          <div style={{padding:"7px 11px",background:C.bg,borderRadius:6,fontSize:12,color:C.t3}}>
+          <div style={{padding:"7px 11px",background:C.bg,borderRadius:6,fontSize:12,color:C.t3,marginBottom:6}}>
             Score {rkR.overallScore} → {rkR.overallScore>=t.acceptAbove?`≥${t.acceptAbove} (Accept)`:rkR.overallScore<t.fightBelow?`<${t.fightBelow} (Fight)`:`${t.fightBelow}–${t.acceptAbove} (Escalate)`}
-          </div></div>
+          </div>
+          {(()=>{const vr=VISA_RULES[code];if(!vr)return null;
+            const ev=(enrichedKase||kase).evidence_available||{};
+            const tags=vr.fieldTags||{};
+            const reqFields=Object.entries(tags).filter(([,t])=>t==="req").map(([f])=>f);
+            function fieldMet(f){
+              const parts=f.split(".");
+              let v=ev;
+              for(const p of parts.slice(1)){v=v?.[p];}
+              return v===true||v!=null&&v!==false&&v!=="null"&&v!=="false";}
+            const metReq=reqFields.filter(fieldMet);
+            const missingReq=reqFields.filter(f=>!fieldMet(f));
+            const allMet=missingReq.length===0;
+            return <div style={{padding:"8px 11px",borderRadius:6,border:`1px solid ${allMet?"#C3E6CB":"#F5C6CB"}`,background:allMet?C.gBg:C.rBg,fontSize:12,display:"flex",alignItems:"flex-start",gap:8}}>
+              <span style={{fontWeight:700,color:allMet?C.green:C.red,flexShrink:0}}>{allMet?"✓":"⚠"}</span>
+              <div>
+                <span style={{fontWeight:700,color:allMet?C.green:C.red}}>Visa Compliance ({code}): </span>
+                {allMet
+                  ? <span style={{color:C.t2}}>All {metReq.length} required evidence fields confirmed — this case meets Visa network standards for representment.</span>
+                  : <span style={{color:C.t2}}>{missingReq.length} required evidence field{missingReq.length>1?"s":""} missing ({missingReq.map(f=>f.split(".").slice(-1)[0].replace(/_/g," ")).join(", ")}) — this weakens the fight position under Visa rules.</span>}
+              </div>
+            </div>;
+          })()}
+          </div>
+
+        {(()=>{const vr=VISA_RULES[code];if(!vr||!evR)return null;
+          const ev=(enrichedKase||kase).evidence_available||{};
+          const FIELD_LABELS={"evidence_available.delivery_confirmation.exists":"Proof of delivery","evidence_available.delivery_confirmation.tracking_number":"Carrier tracking confirmation","evidence_available.delivery_confirmation.signature_on_file":"Signature confirmation","evidence_available.delivery_confirmation.delivery_address_match":"Delivery address match","evidence_available.customer_communication.exists":"Customer communication on file","evidence_available.order_confirmation.exists":"Order confirmation exists","evidence_available.order_confirmation.opened":"Order confirmation opened","evidence_available.refund_policy_acceptance.exists":"Refund policy accepted"};
+          function fieldMet(f){const parts=f.replace("evidence_available.","").split(".");let v=ev;for(const p of parts){v=v?.[p];}return v===true||v!=null&&v!==false&&v!=="null"&&v!=="false"&&v!=="undefined";}
+          const reqFields=Object.entries(vr.fieldTags||{}).filter(([,t])=>t==="req").map(([f])=>f);
+          const checks=reqFields.map(f=>({label:FIELD_LABELS[f]||f,met:fieldMet(f)}));
+          const missing=checks.filter(c=>!c.met);
+          const present=checks.filter(c=>c.met);
+          return <div className="ipnl" style={{borderLeft:`3px solid ${missing.length>0?C.red:"#1A56A0"}`,marginBottom:0}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+              <span style={{fontSize:10,fontWeight:700,background:"#1A56A0",color:"#fff",padding:"2px 7px",borderRadius:3,letterSpacing:".5px"}}>VISA</span>
+              <div className="pt" style={{marginBottom:0}}>Network Compliance Check — {code}</div>
+              {missing.length===0
+                ? <span style={{fontSize:10,fontWeight:700,color:C.green,background:C.gBg,border:"1px solid #C3E6CB",borderRadius:3,padding:"1px 7px"}}>✓ All requirements met</span>
+                : <span style={{fontSize:10,fontWeight:700,color:C.red,background:C.rBg,border:"1px solid #F5C6CB",borderRadius:3,padding:"1px 7px"}}>⚠ {missing.length} gap{missing.length>1?"s":""} found</span>}
+            </div>
+            {missing.length>0&&<div style={{marginBottom:8}}>
+              <div style={{fontSize:10,fontWeight:700,color:C.red,textTransform:"uppercase",letterSpacing:".6px",marginBottom:5}}>Missing Required Evidence</div>
+              {missing.map((c,i)=><div key={i} style={{fontSize:12,color:C.t2,padding:"3px 0",display:"flex",gap:6,alignItems:"center"}}>
+                <span style={{color:C.red,fontWeight:700}}>✗</span>{c.label}
+                <span style={{fontSize:10,color:C.t3,fontStyle:"italic"}}>— weakens fight position under Visa rules</span>
+              </div>)}
+            </div>}
+            {present.length>0&&<div style={{marginBottom:8}}>
+              <div style={{fontSize:10,fontWeight:700,color:C.green,textTransform:"uppercase",letterSpacing:".6px",marginBottom:5}}>Confirmed Evidence</div>
+              {present.map((c,i)=><div key={i} style={{fontSize:12,color:C.t2,padding:"3px 0",display:"flex",gap:6,alignItems:"center"}}>
+                <span style={{color:C.green,fontWeight:700}}>✓</span>{c.label}
+              </div>)}
+            </div>}
+            <div style={{fontSize:11,color:C.t3,fontStyle:"italic",borderTop:`1px solid ${C.border}`,paddingTop:7,lineHeight:1.6}}>{vr.guidance}</div>
+          </div>;
+        })()}
 
         <div className="ipnl">
           <div style={{marginBottom:11}}>
@@ -1117,12 +1302,15 @@ function InvestigationTab({cfg, cfgV}){
           {lDec==="escalate"&&lTxt&&!lTxt.startsWith("[Error")&&(()=>{
             let recs=[];try{recs=JSON.parse(lTxt).recommendations||[];}catch(e){}
             return recs.length>0&&<div>
-              <div style={{fontSize:11,fontWeight:700,color:C.t2,textTransform:"uppercase",letterSpacing:".7px",marginBottom:8}}>Recommended Investigation Steps</div>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                <div style={{fontSize:11,fontWeight:700,color:C.t2,textTransform:"uppercase",letterSpacing:".7px"}}>Recommended Investigation Steps</div>
+                <button className="btn p sm" style={{fontSize:11,padding:"3px 10px"}} onClick={()=>{}}>▶ Run Investigation</button>
+              </div>
               {recs.map((r,i)=><div key={i} style={{marginBottom:10,padding:"10px 12px",background:C.bg,borderRadius:8,borderLeft:`3px solid ${C.amber}`}}>
                 <div style={{fontSize:13,fontWeight:600,color:C.t1,marginBottom:3}}>{i+1}. {r.title}</div>
                 <div style={{fontSize:12,color:C.t2,marginBottom:4}}>{r.action}</div>
                 <div style={{fontSize:11,color:C.t3,fontStyle:"italic"}}>{r.rationale}</div>
-              </div>)};
+              </div>)}
             </div>;
           })()}
           {lDec==="escalate"&&lTxt&&lTxt.startsWith("[Error")&&<div style={{fontSize:12,color:C.red,padding:"8px 10px",background:C.rBg,borderRadius:6}}>{lTxt}</div>}
