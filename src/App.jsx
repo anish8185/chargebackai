@@ -204,7 +204,7 @@ const CASES=[
 // Evidence/risk: only system + matched factors. No config or case context needed.
 async function callLLM(systemPrompt, userPrompt){
   const r=await fetch("https://api.anthropic.com/v1/messages",{
-    method:"POST",headers:{"Content-Type":"application/json"},
+    method:"POST",headers:{"Content-Type":"application/json","x-api-key":import.meta.env.VITE_ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
     body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,temperature:0,system:systemPrompt,
       messages:[{role:"user",content:userPrompt}]})});
   if(!r.ok)throw new Error(`API ${r.status}: ${await r.text()}`);
@@ -220,7 +220,7 @@ async function callLLMFull(systemPrompt, configPrompt, casePrompt, userPrompt){
     {role:"assistant",content:"Case data received and understood."},
     {role:"user",content:userPrompt},];
   const r=await fetch("https://api.anthropic.com/v1/messages",{
-    method:"POST",headers:{"Content-Type":"application/json"},
+    method:"POST",headers:{"Content-Type":"application/json","x-api-key":import.meta.env.VITE_ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
     body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,system:systemPrompt,messages})});
   if(!r.ok)throw new Error(`API ${r.status}: ${await r.text()}`);
   const d=await r.json();
