@@ -1255,7 +1255,7 @@ function InvestigationTab({cfg, cfgV}){
                 {d:"accept",icon:"✓",l:"Accept",sub:"Dispute is valid — provisional credit made permanent"},
                 {d:"escalate",icon:"↑",l:"Escalate",sub:"Ambiguous — more investigation needed"},
               ].map(({d,icon,l,sub})=>(
-                <div key={d} className={`ao${lDec===d?d==="fight"?" sf":d==="accept"?" sa":" se":""}`} onClick={()=>{setLDec(d);setLDirty(true);}}>
+                <div key={d} className={`ao${lDec===d?d==="fight"?" sf":d==="accept"?" sa":" se":""}`} onClick={()=>{setLDec(d);setLTxt("");setLDirty(true);}}>
                   <div style={{fontSize:14,marginBottom:2}}>{icon}</div>
                   <div style={{fontSize:12,fontWeight:700,color:dc(d)}}>{l}</div>
                   <div style={{fontSize:10,color:C.t3,marginTop:2}}>{d===recVal?"AI rec":sub}</div>
